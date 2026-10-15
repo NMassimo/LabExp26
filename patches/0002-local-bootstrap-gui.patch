@@ -1,0 +1,55 @@
+OTNS base: 1d61489561c22041b4877467c086721cfd0d2263
+Subject: Local Python environment and native GUI proxy
+
+diff --git a/script/common.sh b/script/common.sh
+index 16e93a198e88526f7eecad204362986872fbcef2..1038400dd6b68962709af5528c4cd6065f74a29b 100644
+--- a/script/common.sh
++++ b/script/common.sh
+@@ -123,9 +123,10 @@ build_openthread_versions()
+ 
+ activate_python_venv()
+ {
+-    if [[ ! -d .venv-otns ]]; then
+-        python3 -m venv .venv-otns
++    local venv_dir="${OTNS_PYTHON_VENV:-.venv-otns}"
++    if [[ ! -d "$venv_dir" ]]; then
++        python3 -m venv "$venv_dir"
+     fi
+     # shellcheck source=/dev/null
+-    source .venv-otns/bin/activate
++    source "$venv_dir/bin/activate"
+ }
+diff --git a/script/install-deps b/script/install-deps
+index c2271c5b4c2fe7be76647d07963de82570ca7185..2db13b9b9387d5584f898f56784898d623cb6df4 100755
+--- a/script/install-deps
++++ b/script/install-deps
+@@ -46,22 +46,18 @@ install_packages()
+     install_package unzip --apt unzip --brew unzip || true
+     install_package python3 --apt python3 --brew python3 || true
+     # On MacOS (Darwin), no venv brew package exists - not needed. Use dummy name.
+-    install_package virtualenv --apt python3-venv --brew python3 || true
++    if ! python3 -c "import venv, ensurepip" >/dev/null 2>&1; then
++        install_package virtualenv --apt python3-venv --brew python3
++    fi
+ }
+ 
+ install_grpcwebproxy()
+ {
+-    if ! installed grpcwebproxy; then
+-        if [[ $Darwin == 1 ]]; then
+-            wget https://github.com/improbable-eng/grpc-web/releases/download/v0.12.0/grpcwebproxy-v0.12.0-osx-x86_64.zip -O /tmp/grpcwebproxy.zip && cd /tmp/ && unzip grpcwebproxy.zip && mv dist/grpcwebproxy* "$GOPATH"/bin/grpcwebproxy
+-        else
+-            wget https://github.com/improbable-eng/grpc-web/releases/download/v0.12.0/grpcwebproxy-v0.12.0-linux-x86_64.zip -O /tmp/grpcwebproxy.zip && cd /tmp/ && unzip grpcwebproxy.zip && mv dist/grpcwebproxy* "$GOPATH"/bin/grpcwebproxy
+-        fi
+-        cd -
+-        echo "grpcwebproxy installed: $(command -v grpcwebproxy)"
+-    else
+-        echo "grpcwebproxy found: $(command -v grpcwebproxy)"
++    # Build for the host architecture and honor a course-local GOBIN.
++    if ! installed grpcwebproxy || [[ -n "${GOBIN:-}" && ! -x "$GOBIN/grpcwebproxy" ]]; then
++        go install github.com/improbable-eng/grpc-web/go/grpcwebproxy@v0.15.0
+     fi
++    echo "grpcwebproxy installed: $(command -v grpcwebproxy)"
+ }
+ 
+ install_python_libs()

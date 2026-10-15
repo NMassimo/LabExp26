@@ -6,7 +6,10 @@ Base commit: `1d61489561c22041b4877467c086721cfd0d2263`
 
 `0001-configurable-radio-energy.patch` contains the radio consumption model,
 profile, JSON CLI commands, Python methods, documentation, tests and example.
-Apply it with:
+`0002-local-bootstrap-gui.patch` lets the upstream bootstrap use a selected
+Python environment and compiles grpcwebproxy v0.15.0 for the host architecture
+into the selected GOBIN. The standard bootstrap still installs/builds all OTNS
+components. Apply the series with:
 
 ```sh
 python3 scripts/apply-patches.py
@@ -37,9 +40,9 @@ python3 scripts/export-patch.py
 ./scripts/check.sh
 ```
 
-The exporter includes both modified upstream files and new files, without
+The exporter regenerates both patches and includes modified upstream files and new files, without
 changing the submodule index. If the implementation adds another source file,
-include its path in `scripts/export-patch.py`. Review the generated diff before
+include its path in the appropriate group in `scripts/export-patch.py`. Review the generated diff before
 committing it to the course repository. Test application on a fresh checkout
 when changing the patch or upstream revision.
 

@@ -1,30 +1,52 @@
 #!/usr/bin/env bash
-# Build the pinned simulator and Thread 1.4 nodes into this checkout.
+# Install patched OTNS, all node versions and the GUI, then run course checks.
 set -euo pipefail
 LAB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+case "$(uname -s)" in
+    Darwin)
+        Darwin=1; Linux=0
+        if ! command -v brew >/dev/null 2>&1; then
+            echo "Install Homebrew (https://brew.sh) and rerun this script." >&2
+            exit 1
+        fi
+        ;;
+    Linux) Darwin=0; Linux=1 ;;
+    *) echo "Use Linux, macOS or Ubuntu under WSL2." >&2; exit 1 ;;
+esac
+command -v git >/dev/null 2>&1 || { echo "Git is required to clone the repository." >&2; exit 1; }
+git -C "$LAB_ROOT" submodule update --init --recursive -- otns
+# Reuse upstream package-manager helpers before Python is available.
+source "$LAB_ROOT/otns/script/utils.sh"
+install_package python3 --apt python3 --brew python3
 LAB_PYTHON=${LAB_PYTHON:-python3}
-for tool in git go cmake ninja c++; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "Missing prerequisite: $tool. See README.md." >&2
+if ! "$LAB_PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 10))'; then
+    if [[ $Darwin == 1 ]]; then
+        brew install python3
+        LAB_PYTHON="$(brew --prefix)/bin/python3"
+    else
+        echo "Python 3.10+ is required; use Ubuntu 22.04+ or set LAB_PYTHON." >&2
         exit 1
     fi
-done
-"$LAB_PYTHON" -c 'import sys; assert sys.version_info >= (3, 10), "Python 3.10+ required"'
-git -C "$LAB_ROOT" submodule update --init --recursive -- otns
+fi
+if ! "$LAB_PYTHON" -c 'import venv, ensurepip' >/dev/null 2>&1; then
+    install_package virtualenv --apt python3-venv --brew python3
+fi
 "$LAB_PYTHON" "$LAB_ROOT/scripts/apply-patches.py"
+LAB_GO_BIN=$("$LAB_PYTHON" "$LAB_ROOT/scripts/ensure-go.py")
 mkdir -p "$LAB_ROOT/.local/bin"
+export GOBIN="$LAB_ROOT/.local/bin"
+export OTNS_PYTHON_VENV="$LAB_ROOT/.venv"
+export OTNS="$GOBIN/otns"
+if [[ ! -d "$OTNS_PYTHON_VENV" ]]; then
+    "$LAB_PYTHON" -m venv "$OTNS_PYTHON_VENV"
+fi
+export PATH="$OTNS_PYTHON_VENV/bin:$GOBIN:$LAB_GO_BIN:$PATH"
+python -m pip install -r "$LAB_ROOT/requirements.txt"
 (
     cd "$LAB_ROOT/otns"
     cp "$LAB_ROOT/locks/otns-go.sum" go.sum
-    go build -o "$LAB_ROOT/.local/bin/otns" ./cmd/otns
+    ./script/bootstrap
 )
-(
-    cd "$LAB_ROOT/otns/ot-rfsim"
-    ./script/build_latest
-)
-if [[ ! -d "$LAB_ROOT/.venv" ]]; then
-    "$LAB_PYTHON" -m venv "$LAB_ROOT/.venv"
-fi
-"$LAB_ROOT/.venv/bin/python" -m pip install -r "$LAB_ROOT/requirements.txt"
-"$LAB_ROOT/.venv/bin/python" -m pip install --no-deps --no-build-isolation "$LAB_ROOT/otns/pylibs"
-echo "Environment ready. Run ./scripts/check.sh and ./scripts/run-example.sh."
+"$LAB_ROOT/scripts/check.sh"
+"$LAB_ROOT/scripts/run-example.sh"
+echo "Setup and checks completed. Start the GUI with ./scripts/run-otns.sh."

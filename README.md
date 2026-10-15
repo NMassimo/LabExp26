@@ -17,60 +17,80 @@ commit **`1d61489561c22041b4877467c086721cfd0d2263`**. Its OpenThread submodule
 and nested dependencies are pinned transitively. The same OTNS revision is
 recorded in [otns.commit](otns.commit).
 
-The [course patch](patches/0001-configurable-radio-energy.patch) adds configurable
-radio energy accounting, current-time JSON snapshots and Python accessors. It is
-applied to the upstream checkout during setup; OTNS itself is not forked or
-committed with local changes.
+The [course patch series](patches/README.md) adds configurable radio energy,
+JSON/Python snapshots and integration of the upstream bootstrap with a local
+Python environment and native GUI proxy. Patches are applied to the upstream
+checkout during setup; OTNS itself stays at the pinned commit.
 
-## Requirements
+## One-command setup
 
-- Linux or macOS. On Windows use WSL2 with Ubuntu 22.04 or newer and work inside
-  the Linux filesystem.
-- Git, Go **1.23+**, Python **3.10+** with `venv`/`pip`, CMake, Ninja and a C/C++
-  compiler.
-- Internet access for the initial checkout and dependency installation.
-
-On Ubuntu, install the build tools with:
+Clone the course repository, then run **one script**:
 
 ```sh
-sudo apt update
-sudo apt install git build-essential cmake ninja-build python3 python3-venv python3-pip
-```
-
-Install Go 1.23 or newer separately if your package manager provides an older
-version. On macOS install the Xcode command-line tools and the corresponding
-Git, Go, Python, CMake and Ninja packages, for example through Homebrew.
-
-## Setup
-
-Clone the course repository recursively, using its GitHub URL:
-
-```sh
-git clone --recurse-submodules <repository-url> lab-experience
+git clone <repository-url> lab-experience
 cd lab-experience
 ./scripts/setup.sh
-./scripts/check.sh
-./scripts/run-example.sh
 ```
 
-If you already cloned without `--recurse-submodules`, `setup.sh` initializes the
-submodules. Setup applies the patch, builds OTNS and the Thread 1.4 FTD/MTD nodes,
-and installs the Python package in **`.venv/`**. The simulator executable is
-**`.local/bin/otns`**. No global OTNS or Python installation is overwritten.
-Only the current Thread node version is built; legacy versions and a border
-router are not required for this activity. The first build may take several minutes.
+The script initializes the pinned submodules, applies both course patches and
+runs the **upstream OTNS bootstrap**. It installs the required build tools,
+prepares Python, builds OTNS plus all standard node versions (including the
+border router), installs the native GUI proxy and runs the upstream version
+tests, course checks and a traffic example. The GUI assets are bundled with
+OTNS; Node.js/npm are not required to run it.
 
-The setup script can be rerun. The patch script recognizes an already-applied
-patch and refuses incompatible edits or an unexpected OTNS revision. If Python
-is available under another name, set `LAB_PYTHON`, for example:
+The simulator and GUI proxy are installed in **`.local/bin/`** and Python
+packages in **`.venv/`**. If Go 1.23+ is unavailable, a local Go toolchain is
+downloaded with a verified SHA-256 checksum. OTNS/Python installations elsewhere
+on the machine are not overwritten. System build dependencies may be installed
+through the platform package manager and may request administrator access.
+
+Prerequisites for running setup:
+
+- **Linux:** Ubuntu 22.04+ with Git, a browser and access to `sudo`/APT.
+- **Windows:** WSL2 with Ubuntu 22.04+, Git and `sudo`/APT. Keep the checkout in
+  the Linux filesystem. The browser can run on Windows.
+- **macOS:** Git/Xcode command-line tools, Homebrew and a browser. The setup
+  supports Intel and Apple Silicon.
+- Internet access and sufficient disk space for the Go, C/C++ and node builds.
+
+The first complete build may take several minutes. The script can be rerun:
+existing dependencies/build outputs are reused and patches are not applied twice.
+For a particular Python installation, set `LAB_PYTHON`, for example:
 
 ```sh
 LAB_PYTHON=python3.12 ./scripts/setup.sh
 ```
 
-The checks cover energy integration, power changes, fresh exports, per-node
-accounting and Python control against actual OT-RFSIM node processes. They need
-local sockets and are intended to run on your computer.
+## Start OTNS with its GUI
+
+After setup:
+
+```sh
+./scripts/run-otns.sh
+```
+
+This opens the GUI in the default browser and starts the OTNS CLI. If browser
+opening is unavailable (for example in WSL2), open
+[the local GUI](http://localhost:8997/visualize?addr=localhost:8998) manually while
+OTNS is running. Load the laboratory energy profile in the OTNS CLI with:
+
+```text
+energy model "etc/energy-lab-example.json"
+```
+
+## Checks
+
+Setup runs the checks automatically. To rerun them independently:
+
+```sh
+./scripts/check.sh
+```
+
+They verify energy integration, power changes, exports and Python control using
+OT-RFSIM processes. The GUI check verifies all three GUI pages, JavaScript
+assets, the native proxy, an energy-snapshot RPC and the visualization stream over gRPC-Web without
+opening a browser. Checks require local sockets and should run sequentially.
 
 ## Working with Python
 
@@ -135,9 +155,9 @@ in `otns/energy/README.md` and `otns/pylibs/examples/energy_control.py`.
 otns/                 pinned upstream submodule
 otns.commit           expected OTNS revision
 patches/              course modifications to OTNS
-scripts/              setup, checks and example launcher
+scripts/              setup, checks, GUI and example launchers
 requirements.txt      pinned Python dependencies
-locks/                Go dependency checksums
+locks/                Go dependency and toolchain checksums
 .local/               generated local executable (ignored)
 .venv/                generated Python environment (ignored)
 results/              generated experiment files (ignored)
