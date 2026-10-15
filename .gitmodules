@@ -1,0 +1,4 @@
+[submodule "otns"]
+	path = otns
+	url = https://github.com/openthread/ot-ns.git
+	ignore = dirty

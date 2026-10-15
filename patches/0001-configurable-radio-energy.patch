@@ -1,0 +1,1433 @@
+OTNS base: 1d61489561c22041b4877467c086721cfd0d2263
+Subject: Configurable radio energy and Python snapshots
+
+diff --git a/cli/CmdRunner.go b/cli/CmdRunner.go
+index 64fcf84044aa3d8ed46740ace30d03fb23783206..82d2497f5d8ced8e69ea1b7c0bc29520a28399d1 100644
+--- a/cli/CmdRunner.go
++++ b/cli/CmdRunner.go
+@@ -28,6 +28,7 @@ package cli
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"fmt"
+ 	"io"
+ 	"os"
+@@ -42,6 +43,7 @@ import (
+ 	"net/netip"
+ 
+ 	"github.com/openthread/ot-ns/dispatcher"
++	"github.com/openthread/ot-ns/energy"
+ 	"github.com/openthread/ot-ns/logger"
+ 	"github.com/openthread/ot-ns/progctx"
+ 	"github.com/openthread/ot-ns/radiomodel"
+@@ -1245,14 +1247,51 @@ func (rt *CmdRunner) executeCoaps(cc *CommandContext, cmd *CoapsCmd) {
+ 	}
+ }
+ 
+-func (rt *CmdRunner) executeEnergy(cc *CommandContext, energy *EnergyCmd) {
+-	if energy.Save != nil {
++func (rt *CmdRunner) executeEnergy(cc *CommandContext, cmd *EnergyCmd) {
++	if cmd.Save != nil {
+ 		rt.postAsyncWait(cc, func(sim *simulation.Simulation) {
+-			sim.GetEnergyAnalyser().SaveEnergyDataToFile(energy.Name, sim.Dispatcher().CurTime)
++			sim.GetEnergyAnalyser().SaveEnergyDataToFile(cmd.Save.Name, sim.Dispatcher().CurTime)
+ 		})
++	} else if cmd.Snapshot != nil || cmd.Model != nil {
++		var model energy.Model
++		if cmd.Model != nil && cmd.Model.Path != "" {
++			var err error
++			model, err = energy.LoadModel(cmd.Model.Path)
++			if err != nil {
++				cc.error(err)
++				return
++			}
++		}
++		var result interface{}
++		rt.postAsyncWait(cc, func(sim *simulation.Simulation) {
++			analyser := sim.GetEnergyAnalyser()
++			ts := sim.Dispatcher().CurTime
++			if cmd.Snapshot != nil {
++				result = analyser.Snapshot(ts)
++			} else {
++				if cmd.Model.Path != "" {
++					if err := analyser.SetModel(model, ts); err != nil {
++						cc.error(err)
++						return
++					}
++				}
++				result = analyser.Model()
++			}
++		})
++		if cc.Err() != nil {
++			return
++		}
++		data, err := json.Marshal(result)
++		if err != nil {
++			cc.error(err)
++			return
++		}
++		cc.outputf("%s\n", data)
+ 	} else {
+ 		cc.outputf("energy <command>\n")
+ 		cc.outputf("\tsave [output name]\n")
++		cc.outputf("\tsnapshot (JSON, cumulative joules, current nodes)\n")
++		cc.outputf("\tmodel [\"JSON configuration path\"]\n")
+ 	}
+ }
+ 
+diff --git a/cli/README.md b/cli/README.md
+index 08222c22aaa9d4b2be7365fe11d615f6438efc80..0438d916b1e64e3a8ea068e51a97275217ab09b6 100644
+--- a/cli/README.md
++++ b/cli/README.md
+@@ -233,11 +233,51 @@ Done
+ 
+ ### energy
+ 
+-To be documented (TODO) - saves energy use information of nodes to file.
++Configure radio electrical consumption, read cumulative energy, or save energy history.
+ 
+ ```shell
+-energy [save] "<filename>"
+-```
++energy snapshot
++energy model ["<configuration.json>"]
++energy save ["<filename>"]
++```
++
++`energy snapshot` returns a single JSON object, closing all open radio-state
++intervals at the current simulation time without advancing time. The root
++`total_j`, `disabled_j`, `sleep_j`, `tx_j`, and `rx_j` are **sums over current
++nodes**, in joules. `nodes` contains the same quantities per `node_id`, plus
++cumulative `state_times_us`. The object also includes `schema_version` (1),
++`time_us`, `model_name`, `model_revision`, and `scope` (`current_nodes`). Nodes
++are ordered by ID. Repeated reads at the same time are idempotent. Subtract
++snapshots to evaluate a window, keeping the node set fixed; deletion removes a
++node's contribution and recreating an ID starts new counters.
++
++`energy model` returns the active model as JSON; with a quoted path, it loads a
++configuration and returns the new model. Each model contains `name`,
++`disabled_mw`, `sleep_mw`, `rx_mw`, and `tx`: a nonempty, strictly increasing table
++of `{"dbm": -10, "mw": 15.9}` points. Values are electrical power in mW, **not**
++RF radiated power. Consumption is interpolated linearly in dBm and clamped at
++the endpoints. A one-point table is constant. Fields and numbers are validated;
++unknown or missing fields are rejected. A model change closes existing
++intervals with the old coefficients, preserves past energy and increments
++`model_revision`. Configure the model before evaluation for comparable rewards.
++
++Without an explicit profile, OTNS uses the `legacy-constant` consumption model.
++For a variable TX curve load `etc/energy-lab-example.json`, a **datasheet-based
++TI CC2652R approximation at 3 V**, with TX settings from -20 to +5 dBm. It uses
++typical chip currents, not measurements of a complete Thread device. Restrict
++algorithm actions to the profile range. Idle listening is charged as RX; Sleep
++means radio off. See [profile sources](../etc/energy-lab-example.md) and
++[energy model details](../energy/README.md).
++
++`energy save` retains the existing text formats in `energy_results/` and closes
++open intervals before writing. Per-node energies are in mJ. The network history
++and GUI report the **mean per current node**, in mJ; use the JSON
++snapshot for network totals. The history export includes a sample at the save
++time. This model accounts for radio states, including actual frame TX (ACKs and
++retries), not CPU, sensors, or whole-board consumption.
++
++Python provides `ns.energy_model(filename)` and `ns.energy_snapshot()` returning
++dictionaries. No log/file parsing or gRPC/protobuf regeneration is needed.
+ 
+ ### exe
+ 
+diff --git a/cli/ast.go b/cli/ast.go
+index 67252925ced8962539510a204d8f4e932311da2c..063fdfd9ed09845b0fc65a7016eb61bf4efd2366 100644
+--- a/cli/ast.go
++++ b/cli/ast.go
+@@ -396,14 +396,27 @@ type WebCmd struct {
+ 
+ // noinspection GoVetStructTag
+ type EnergyCmd struct {
+-	Cmd  struct{}  `"energy"` //nolint
+-	Save *SaveFlag `( @@ )?`  //nolint
+-	Name string    `@String?` //nolint
++	Cmd      struct{}           `"energy"` //nolint
++	Save     *EnergySaveCmd     `( @@`     //nolint
++	Snapshot *EnergySnapshotCmd `| @@`     //nolint
++	Model    *EnergyModelCmd    `| @@ )?`  //nolint
+ }
+ 
+ // noinspection GoVetStructTag
+-type SaveFlag struct {
+-	Dummy struct{} `"save"` //nolint
++type EnergySaveCmd struct {
++	Dummy struct{} `"save"`   //nolint
++	Name  string   `@String?` //nolint
++}
++
++// noinspection GoVetStructTag
++type EnergySnapshotCmd struct {
++	Dummy struct{} `"snapshot"` //nolint
++}
++
++// noinspection GoVetStructTag
++type EnergyModelCmd struct {
++	Dummy struct{} `"model"`  //nolint
++	Path  string   `@String?` //nolint
+ }
+ 
+ // noinspection GoVetStructTag
+diff --git a/dispatcher/dispatcher.go b/dispatcher/dispatcher.go
+index 419d053e10514dbb2a2e85c19eb4b41a4f04464c..84c7a5b68871bd8f24c5e0ba8799b70536d4305a 100644
+--- a/dispatcher/dispatcher.go
++++ b/dispatcher/dispatcher.go
+@@ -616,6 +616,11 @@ func (d *Dispatcher) processNextEvents(simSpeed float64) bool {
+ 							d.visSendInterference(evt.NodeId, BroadcastNodeId, evt.RadioCommData)
+ 						}
+ 						d.radioModel.HandleEvent(node.RadioNode, d.eventQueue, evt)
++						if d.energyAnalyser != nil {
++							// The radio model retains the effective power of the accepted frame
++							// (ACKs/retries included). A rejected concurrent TX must not change it.
++							d.energyAnalyser.GetNode(node.Id).SetTransmitPower(int8(node.RadioNode.TxPower), d.CurTime)
++						}
+ 					case EventTypeRadioState:
+ 						d.handleRadioState(node, evt)
+ 						d.radioModel.HandleEvent(node.RadioNode, d.eventQueue, evt)
+diff --git a/energy/core.go b/energy/core.go
+index ba58a4159f459ef7391e29bd8d05bc0aacb2df1b..7377fd23df112aa30eec62176d353479f8d3b9ce 100644
+--- a/energy/core.go
++++ b/energy/core.go
+@@ -36,6 +36,8 @@ import (
+ )
+ 
+ type EnergyAnalyser struct {
++	model                *Model
++	modelRevision        uint64
+ 	nodes                map[int]*NodeEnergy
+ 	networkHistory       []NetworkConsumption
+ 	energyHistoryByNodes [][]*NodeEnergy
+@@ -46,7 +48,7 @@ func (e *EnergyAnalyser) AddNode(nodeID int, timestamp uint64) {
+ 	if _, ok := e.nodes[nodeID]; ok {
+ 		return
+ 	}
+-	e.nodes[nodeID] = newNode(nodeID, timestamp)
++	e.nodes[nodeID] = newNode(nodeID, timestamp, e.model)
+ }
+ 
+ func (e *EnergyAnalyser) DeleteNode(nodeID int) {
+@@ -85,10 +87,10 @@ func (e *EnergyAnalyser) StoreNetworkEnergy(timestamp uint64) {
+ 
+ 		e := &NodeEnergy{
+ 			NodeId:   node.NodeId,
+-			Disabled: float64(node.radio.SpentDisabled) * RadioDisabledConsumption,
+-			Sleep:    float64(node.radio.SpentSleep) * RadioSleepConsumption,
+-			Tx:       float64(node.radio.SpentTx) * RadioTxConsumption,
+-			Rx:       float64(node.radio.SpentRx) * RadioRxConsumption,
++			Disabled: node.Disabled,
++			Sleep:    node.Sleep,
++			Tx:       node.Tx,
++			Rx:       node.Rx,
+ 		}
+ 
+ 		networkSnapshot.EnergyConsDisabled += e.Disabled / netSize
+@@ -98,11 +100,19 @@ func (e *EnergyAnalyser) StoreNetworkEnergy(timestamp uint64) {
+ 		nodesEnergySnapshot = append(nodesEnergySnapshot, e)
+ 	}
+ 
+-	e.networkHistory = append(e.networkHistory, networkSnapshot)
+-	e.energyHistoryByNodes = append(e.energyHistoryByNodes, nodesEnergySnapshot)
++	// GUI/history report the mean per current node, in mJ.
++	last := len(e.networkHistory) - 1
++	if last >= 0 && e.networkHistory[last].Timestamp == timestamp {
++		e.networkHistory[last] = networkSnapshot
++		e.energyHistoryByNodes[last] = nodesEnergySnapshot
++	} else {
++		e.networkHistory = append(e.networkHistory, networkSnapshot)
++		e.energyHistoryByNodes = append(e.energyHistoryByNodes, nodesEnergySnapshot)
++	}
+ }
+ 
+ func (e *EnergyAnalyser) SaveEnergyDataToFile(name string, timestamp uint64) {
++	e.StoreNetworkEnergy(timestamp)
+ 	if name == "" {
+ 		if e.title == "" {
+ 			name = "energy"
+@@ -168,10 +178,10 @@ func (e *EnergyAnalyser) writeEnergyByNodes(fileNodes *os.File, timestamp uint64
+ 		node := e.nodes[id]
+ 		fmt.Fprintf(fileNodes, "%d\t%f\t%f\t%f\t%f\n",
+ 			id,
+-			float64(node.radio.SpentDisabled)*RadioDisabledConsumption,
+-			float64(node.radio.SpentSleep)*RadioSleepConsumption,
+-			float64(node.radio.SpentTx)*RadioTxConsumption,
+-			float64(node.radio.SpentRx)*RadioRxConsumption,
++			node.Disabled,
++			node.Sleep,
++			node.Tx,
++			node.Rx,
+ 		)
+ 	}
+ }
+@@ -201,7 +211,10 @@ func (e *EnergyAnalyser) SetTitle(title string) {
+ }
+ 
+ func NewEnergyAnalyser() *EnergyAnalyser {
++	model := LegacyModel()
+ 	ea := &EnergyAnalyser{
++		model:                &model,
++		modelRevision:        1,
+ 		nodes:                make(map[int]*NodeEnergy),
+ 		networkHistory:       make([]NetworkConsumption, 0, 3600), //Start with space for 1 sample every 30s for 1 hour = 1*60*60/30 = 3600 samples
+ 		energyHistoryByNodes: make([][]*NodeEnergy, 0, 3600),
+diff --git a/energy/node.go b/energy/node.go
+index 4447fb4b08810b2cf72792c89bb98c7c27eac2e7..5c676edd004fe5978c773ddba627e07efbd7ec2e 100644
+--- a/energy/node.go
++++ b/energy/node.go
+@@ -32,8 +32,10 @@ import (
+ )
+ 
+ type NodeEnergy struct {
+-	NodeId int
+-	radio  RadioStatus
++	NodeId     int
++	radio      RadioStatus
++	model      *Model
++	txPowerDbm int8
+ 
+ 	Disabled float64
+ 	Sleep    float64
+@@ -42,16 +44,24 @@ type NodeEnergy struct {
+ }
+ 
+ func (node *NodeEnergy) ComputeRadioState(timestamp uint64) {
++	logger.AssertTrue(timestamp >= node.radio.Timestamp, "energy time cannot move backwards")
+ 	delta := timestamp - node.radio.Timestamp
++	// mW * us / 1e6 = mJ. Accumulate using the OLD state and power;
++	// never reweight past transmissions when power or model changes.
++	duration := float64(delta) / 1e6
+ 	switch node.radio.State {
+ 	case RadioDisabled:
+ 		node.radio.SpentDisabled += delta
++		node.Disabled += duration * node.model.DisabledMW
+ 	case RadioSleep:
+ 		node.radio.SpentSleep += delta
++		node.Sleep += duration * node.model.SleepMW
+ 	case RadioTx:
+ 		node.radio.SpentTx += delta
++		node.Tx += duration * node.model.TxMW(node.txPowerDbm)
+ 	case RadioRx:
+ 		node.radio.SpentRx += delta
++		node.Rx += duration * node.model.RxMW
+ 	case RadioInvalid:
+ 		break // skip bookkeeping in this case
+ 	default:
+@@ -60,15 +70,23 @@ func (node *NodeEnergy) ComputeRadioState(timestamp uint64) {
+ 	node.radio.Timestamp = timestamp
+ }
+ 
++// SetTransmitPower records the effective power from a physical frame event.
++// State transitions at the same timestamp can arrive in either order.
++func (node *NodeEnergy) SetTransmitPower(dbm int8, timestamp uint64) {
++	node.ComputeRadioState(timestamp)
++	node.txPowerDbm = dbm
++}
++
+ func (node *NodeEnergy) SetRadioState(state RadioStates, timestamp uint64) {
+ 	//Mandatory: compute energy consumed by the radio first.
+ 	node.ComputeRadioState(timestamp)
+ 	node.radio.State = state
+ }
+ 
+-func newNode(nodeID int, timestamp uint64) *NodeEnergy {
++func newNode(nodeID int, timestamp uint64, model *Model) *NodeEnergy {
+ 	node := &NodeEnergy{
+ 		NodeId: nodeID,
++		model:  model,
+ 		radio: RadioStatus{
+ 			State:         RadioDisabled,
+ 			SpentDisabled: 0.0,
+diff --git a/energy/types.go b/energy/types.go
+index 7363adafbdf454091548006c018de7066cec2c20..45dad954a3562280eb49a4d34a138c5bb285bb41 100644
+--- a/energy/types.go
++++ b/energy/types.go
+@@ -31,10 +31,11 @@ import (
+ )
+ 
+ /*
+- * Default consumption values by state of STM32WB55rg at 3.3V.
++ * Default OTNS consumption values, described as STM32WB55rg at 3.3V.
++ * Use the laboratory Model for TX power studies.
+  * Consumption in kilowatts, time in microseconds, resulting energy in mJ.
+  *
+- * TODO make CLI configurable.
++ * These coefficients have not been hardware-validated here.
+  */
+ const (
+ 	RadioDisabledConsumption float64 = 0.00000011 //kilowatts, to be confirmed
+diff --git a/pylibs/otns/cli/OTNS.py b/pylibs/otns/cli/OTNS.py
+index a02b0834f5cdfbc9bb4b93d060a636463ba16ba6..3e6b8c50a89fc41c0ceb2ee4f9ec74c04ea434bd 100644
+--- a/pylibs/otns/cli/OTNS.py
++++ b/pylibs/otns/cli/OTNS.py
+@@ -1297,6 +1297,29 @@ class OTNS(object):
+         messages = yaml.safe_load('\n'.join(lines))
+         return messages
+ 
++    def energy_snapshot(self) -> Dict[str, Any]:
++        """Return cumulative radio energy in joules at the current simulation time.
++
++        Includes total_j, state components, model_name/model_revision, time_us,
++        and sorted nodes with node_id, energies and state_times_us. Totals sum
++        CURRENT nodes (not the GUI's per-node mean). Reads close open intervals
++        without advancing time. Subtract snapshots over a fixed set of nodes
++        to measure an evaluation window; CPU/whole-board energy is excluded.
++        """
++        return json.loads('\n'.join(self._do_command('energy snapshot')))
++
++    def energy_model(self, filename: Optional[str] = None) -> Dict[str, Any]:
++        """Read the consumption model, or load a JSON model from filename.
++
++        Paths are resolved by the OTNS process. Loading applies prospectively;
++        past energy is preserved and model_revision increments. Default is the
++        legacy constant model. Configure before training/evaluation begins.
++        """
++        command = 'energy model'
++        if filename is not None:
++            command += ' ' + json.dumps(os.fspath(filename))
++        return json.loads('\n'.join(self._do_command(command)))
++
+     def kpi_start(self) -> None:
+         """
+         Start OTNS KPI collection.
+diff --git a/cli/energy_test.go b/cli/energy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b63dfdfe8e4002e6f72efe201e73a1e9a6ec8ac
+--- /dev/null
++++ b/cli/energy_test.go
+@@ -0,0 +1,50 @@
++// Copyright (c) 2026, The OTNS Authors.
++// All rights reserved.
++//
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are met:
++// 1. Redistributions of source code must retain the above copyright
++//    notice, this list of conditions and the following disclaimer.
++// 2. Redistributions in binary form must reproduce the above copyright
++//    notice, this list of conditions and the following disclaimer in the
++//    documentation and/or other materials provided with the distribution.
++// 3. Neither the name of the copyright holder nor the
++//    names of its contributors may be used to endorse or promote products
++//    derived from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++// POSSIBILITY OF SUCH DAMAGE.
++
++package cli
++
++import "testing"
++
++func TestEnergyCommands(t *testing.T) {
++	for _, line := range []string{"energy", "energy save", `energy save "result"`, "energy snapshot", "energy model", `energy model "some path/model.json"`} {
++		var cmd Command
++		if err := parseBytes([]byte(line), &cmd); err != nil {
++			t.Fatalf("%s: %v", line, err)
++		}
++		if cmd.Energy == nil {
++			t.Fatalf("not an energy command: %s", line)
++		}
++		if line == `energy model "some path/model.json"` && cmd.Energy.Model.Path != "some path/model.json" {
++			t.Fatal("lost model path")
++		}
++	}
++	for _, line := range []string{`energy snapshot "ignored"`, "energy nonsense", `energy model "a" "b"`} {
++		var cmd Command
++		if parseBytes([]byte(line), &cmd) == nil {
++			t.Fatalf("accepted %s", line)
++		}
++	}
++}
+diff --git a/energy/model.go b/energy/model.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d3b1ed7b003ea7d0105243c0dd247afb17aa0941
+--- /dev/null
++++ b/energy/model.go
+@@ -0,0 +1,132 @@
++// Copyright (c) 2026, The OTNS Authors.
++// All rights reserved.
++//
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are met:
++// 1. Redistributions of source code must retain the above copyright
++//    notice, this list of conditions and the following disclaimer.
++// 2. Redistributions in binary form must reproduce the above copyright
++//    notice, this list of conditions and the following disclaimer in the
++//    documentation and/or other materials provided with the distribution.
++// 3. Neither the name of the copyright holder nor the
++//    names of its contributors may be used to endorse or promote products
++//    derived from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++// POSSIBILITY OF SUCH DAMAGE.
++
++package energy
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"io"
++	"math"
++	"os"
++)
++
++// TxPoint maps radiated RF power (dBm) to electrical power consumption (mW).
++type TxPoint struct {
++	DBm int     `json:"dbm"`
++	MW  float64 `json:"mw"`
++}
++
++func (point *TxPoint) UnmarshalJSON(data []byte) error {
++	var fields struct {
++		DBm *int     `json:"dbm"`
++		MW  *float64 `json:"mw"`
++	}
++	decoder := json.NewDecoder(bytes.NewReader(data))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&fields); err != nil {
++		return err
++	}
++	if fields.DBm == nil || fields.MW == nil {
++		return fmt.Errorf("each TX point requires dbm and mw")
++	}
++	point.DBm, point.MW = *fields.DBm, *fields.MW
++	return nil
++}
++
++// Model describes radio electrical consumption, not CPU or whole-board power.
++// TX values are linearly interpolated in dBm; values outside the table are
++// clamped to its endpoints. A one-point table specifies constant consumption.
++type Model struct {
++	Name       string    `json:"name"`
++	DisabledMW float64   `json:"disabled_mw"`
++	SleepMW    float64   `json:"sleep_mw"`
++	RxMW       float64   `json:"rx_mw"`
++	Tx         []TxPoint `json:"tx"`
++}
++
++// LegacyModel is the constant-consumption OTNS default.
++func LegacyModel() Model {
++	return Model{
++		Name: "legacy-constant", DisabledMW: RadioDisabledConsumption * 1e6,
++		SleepMW: RadioSleepConsumption * 1e6, RxMW: RadioRxConsumption * 1e6,
++		Tx: []TxPoint{{DBm: 0, MW: RadioTxConsumption * 1e6}},
++	}
++}
++
++func (m Model) Validate() error {
++	if m.Name == "" || len(m.Tx) == 0 {
++		return fmt.Errorf("energy model requires a name and a nonempty TX table")
++	}
++	values := []float64{m.DisabledMW, m.SleepMW, m.RxMW}
++	for i, point := range m.Tx {
++		if point.DBm < -128 || point.DBm > 127 || (i > 0 && point.DBm <= m.Tx[i-1].DBm) {
++			return fmt.Errorf("TX dBm values must be strictly increasing and in [-128, 127]")
++		}
++		values = append(values, point.MW)
++	}
++	for _, value := range values {
++		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
++			return fmt.Errorf("energy consumption must be finite and nonnegative")
++		}
++	}
++	return nil
++}
++
++func (m Model) TxMW(dbm int8) float64 {
++	power := int(dbm)
++	if power <= m.Tx[0].DBm {
++		return m.Tx[0].MW
++	}
++	for i := 1; i < len(m.Tx); i++ {
++		if power <= m.Tx[i].DBm {
++			lo, hi := m.Tx[i-1], m.Tx[i]
++			return lo.MW + (hi.MW-lo.MW)*float64(power-lo.DBm)/float64(hi.DBm-lo.DBm)
++		}
++	}
++	return m.Tx[len(m.Tx)-1].MW
++}
++
++// LoadModel rejects misspelled/unknown fields and trailing JSON documents.
++func LoadModel(path string) (Model, error) {
++	f, err := os.Open(path)
++	if err != nil {
++		return Model{}, err
++	}
++	defer f.Close()
++	// NaN sentinels distinguish omitted/null state powers from explicit zero.
++	m := Model{DisabledMW: math.NaN(), SleepMW: math.NaN(), RxMW: math.NaN()}
++	decoder := json.NewDecoder(f)
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&m); err != nil {
++		return Model{}, err
++	}
++	if err := decoder.Decode(new(interface{})); err != io.EOF {
++		return Model{}, fmt.Errorf("unexpected data after energy model")
++	}
++	return m, m.Validate()
++}
+diff --git a/energy/snapshot.go b/energy/snapshot.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fba0644d2ffcfc3f848ed1b45defa211c8a32d54
+--- /dev/null
++++ b/energy/snapshot.go
+@@ -0,0 +1,112 @@
++// Copyright (c) 2026, The OTNS Authors.
++// All rights reserved.
++//
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are met:
++// 1. Redistributions of source code must retain the above copyright
++//    notice, this list of conditions and the following disclaimer.
++// 2. Redistributions in binary form must reproduce the above copyright
++//    notice, this list of conditions and the following disclaimer in the
++//    documentation and/or other materials provided with the distribution.
++// 3. Neither the name of the copyright holder nor the
++//    names of its contributors may be used to endorse or promote products
++//    derived from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++// POSSIBILITY OF SUCH DAMAGE.
++
++package energy
++
++import "sort"
++
++// EnergyValues uses joules. Existing GUI and text exports continue using mJ.
++type EnergyValues struct {
++	DisabledJ float64 `json:"disabled_j"`
++	SleepJ    float64 `json:"sleep_j"`
++	TxJ       float64 `json:"tx_j"`
++	RxJ       float64 `json:"rx_j"`
++	TotalJ    float64 `json:"total_j"`
++}
++
++type StateTimes struct {
++	Disabled uint64 `json:"disabled"`
++	Sleep    uint64 `json:"sleep"`
++	Tx       uint64 `json:"tx"`
++	Rx       uint64 `json:"rx"`
++}
++
++type NodeSnapshot struct {
++	NodeID int `json:"node_id"`
++	EnergyValues
++	StateTimesUS StateTimes `json:"state_times_us"`
++}
++
++// Snapshot totals include current nodes only. Removing nodes changes this scope.
++type Snapshot struct {
++	SchemaVersion int    `json:"schema_version"`
++	TimeUS        uint64 `json:"time_us"`
++	ModelName     string `json:"model_name"`
++	ModelRevision uint64 `json:"model_revision"`
++	Scope         string `json:"scope"`
++	EnergyValues
++	Nodes []NodeSnapshot `json:"nodes"`
++}
++
++// Snapshot closes open intervals at the requested simulation time without
++// appending history samples. Call on the simulation dispatcher, like other
++// analyser mutations; repeated reads at the same timestamp consume no energy.
++func (e *EnergyAnalyser) Snapshot(timestamp uint64) Snapshot {
++	s := Snapshot{SchemaVersion: 1, TimeUS: timestamp, ModelName: e.model.Name,
++		ModelRevision: e.modelRevision, Scope: "current_nodes", Nodes: make([]NodeSnapshot, 0, len(e.nodes))}
++	ids := make([]int, 0, len(e.nodes))
++	for id := range e.nodes {
++		ids = append(ids, id)
++	}
++	sort.Ints(ids)
++	for _, id := range ids {
++		node := e.nodes[id]
++		node.ComputeRadioState(timestamp)
++		v := EnergyValues{DisabledJ: node.Disabled / 1000, SleepJ: node.Sleep / 1000,
++			TxJ: node.Tx / 1000, RxJ: node.Rx / 1000}
++		v.TotalJ = v.DisabledJ + v.SleepJ + v.TxJ + v.RxJ
++		s.Nodes = append(s.Nodes, NodeSnapshot{NodeID: id, EnergyValues: v,
++			StateTimesUS: StateTimes{node.radio.SpentDisabled, node.radio.SpentSleep, node.radio.SpentTx, node.radio.SpentRx}})
++		s.DisabledJ += v.DisabledJ
++		s.SleepJ += v.SleepJ
++		s.TxJ += v.TxJ
++		s.RxJ += v.RxJ
++		s.TotalJ += v.TotalJ
++	}
++	return s
++}
++
++// Model returns a copy so callers cannot silently reweight open intervals.
++func (e *EnergyAnalyser) Model() Model {
++	m := *e.model
++	m.Tx = append([]TxPoint(nil), m.Tx...)
++	return m
++}
++
++// SetModel preserves past energy and applies new coefficients prospectively.
++func (e *EnergyAnalyser) SetModel(model Model, timestamp uint64) error {
++	if err := model.Validate(); err != nil {
++		return err
++	}
++	model.Tx = append([]TxPoint(nil), model.Tx...)
++	for _, node := range e.nodes {
++		node.ComputeRadioState(timestamp)
++		node.model = &model
++	}
++	e.model = &model
++	e.modelRevision++
++	return nil
++}
+diff --git a/energy/energy_test.go b/energy/energy_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca779cd182246975a41fc5e1c80aacf5d7799076
+--- /dev/null
++++ b/energy/energy_test.go
+@@ -0,0 +1,215 @@
++// Copyright (c) 2026, The OTNS Authors.
++// All rights reserved.
++//
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are met:
++// 1. Redistributions of source code must retain the above copyright
++//    notice, this list of conditions and the following disclaimer.
++// 2. Redistributions in binary form must reproduce the above copyright
++//    notice, this list of conditions and the following disclaimer in the
++//    documentation and/or other materials provided with the distribution.
++// 3. Neither the name of the copyright holder nor the
++//    names of its contributors may be used to endorse or promote products
++//    derived from this software without specific prior written permission.
++//
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++// POSSIBILITY OF SUCH DAMAGE.
++
++package energy
++
++import (
++	"encoding/json"
++	"math"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++
++	. "github.com/openthread/ot-ns/types"
++)
++
++func testModel() Model {
++	return Model{Name: "test", DisabledMW: 0.1, SleepMW: 1, RxMW: 5,
++		Tx: []TxPoint{{DBm: -20, MW: 10}, {DBm: 0, MW: 30}}}
++}
++
++func closeTo(t *testing.T, got, want float64) {
++	t.Helper()
++	if math.Abs(got-want) > 1e-12 {
++		t.Fatalf("got %.15g, want %.15g", got, want)
++	}
++}
++
++func TestModelInterpolationAndValidation(t *testing.T) {
++	m := testModel()
++	for power, want := range map[int8]float64{-128: 10, -20: 10, -10: 20, 0: 30, 127: 30} {
++		closeTo(t, m.TxMW(power), want)
++	}
++	for _, bad := range []Model{
++		{}, {Name: "empty"},
++		{Name: "negative", Tx: []TxPoint{{0, -1}}},
++		{Name: "nan", RxMW: math.NaN(), Tx: m.Tx},
++		{Name: "inf", Tx: []TxPoint{{0, math.Inf(1)}}},
++		{Name: "range", Tx: []TxPoint{{128, 1}}},
++		{Name: "duplicate", Tx: []TxPoint{{0, 1}, {0, 2}}},
++		{Name: "unsorted", Tx: []TxPoint{{0, 1}, {-10, 2}}},
++	} {
++		if bad.Validate() == nil {
++			t.Fatalf("accepted invalid model: %+v", bad)
++		}
++	}
++	if LegacyModel().Validate() != nil {
++		t.Fatal("invalid legacy model")
++	}
++}
++
++func TestEnergyTimelinePowerChangesAndReads(t *testing.T) {
++	e := NewEnergyAnalyser()
++	if err := e.SetModel(testModel(), 0); err != nil {
++		t.Fatal(err)
++	}
++	e.AddNode(7, 0)
++	n := e.GetNode(7)
++	n.SetRadioState(RadioSleep, 1000000)
++	n.SetRadioState(RadioRx, 2000000)
++	// Test both event orders at the same timestamp: state, then frame power.
++	n.SetRadioState(RadioTx, 3000000)
++	n.SetTransmitPower(-20, 3000000)
++	e.Snapshot(3500000) // arbitrary intermediate reading must not change the integral
++	n.SetTransmitPower(0, 4000000)
++	s := e.Snapshot(6000000)
++	closeTo(t, s.DisabledJ, 0.0001)
++	closeTo(t, s.SleepJ, 0.001)
++	closeTo(t, s.RxJ, 0.005)
++	closeTo(t, s.TxJ, 0.070)
++	closeTo(t, s.TotalJ, 0.0761)
++	if !reflect.DeepEqual(s, e.Snapshot(6000000)) {
++		t.Fatal("repeated read changed energy")
++	}
++	if got := s.Nodes[0].StateTimesUS; got != (StateTimes{1000000, 1000000, 3000000, 1000000}) {
++		t.Fatalf("incorrect state durations: %+v", got)
++	}
++	// Reverse event order: a new physical power, then the TX state report.
++	n.SetRadioState(RadioRx, 6000000)
++	n.SetTransmitPower(-20, 7000000)
++	n.SetRadioState(RadioTx, 7000000)
++	s2 := e.Snapshot(8000000)
++	closeTo(t, s2.TxJ-s.TxJ, 0.010)
++	closeTo(t, s2.RxJ-s.RxJ, 0.005)
++}
++
++func TestSnapshotTotalsHistoryAndModelSwitch(t *testing.T) {
++	e := NewEnergyAnalyser()
++	empty := e.Snapshot(0)
++	if empty.TotalJ != 0 || empty.Nodes == nil {
++		t.Fatal("invalid empty snapshot")
++	}
++	if err := e.SetModel(testModel(), 0); err != nil {
++		t.Fatal(err)
++	}
++	for _, id := range []int{8, 2} {
++		e.AddNode(id, 0)
++		e.GetNode(id).SetTransmitPower(-20, 0)
++		e.GetNode(id).SetRadioState(RadioTx, 0)
++	}
++	e.StoreNetworkEnergy(1000000)
++	m := testModel()
++	m.Tx[0].MW = 20
++	if err := e.SetModel(m, 1000000); err != nil {
++		t.Fatal(err)
++	}
++	m.Tx[0].MW = 999 // external mutation must not affect the active model
++	returned := e.Model()
++	returned.Tx[0].MW = 888
++	s := e.Snapshot(2000000)
++	closeTo(t, s.TotalJ, 0.060)
++	closeTo(t, e.energyHistoryByNodes[0][0].Tx, 10)  // snapshot not aliased to node
++	closeTo(t, e.networkHistory[0].EnergyConsTx, 10) // legacy mean in mJ
++	if s.Nodes[0].NodeID != 2 || s.Nodes[1].NodeID != 8 {
++		t.Fatal("unstable node order")
++	}
++	closeTo(t, s.TotalJ, s.Nodes[0].TotalJ+s.Nodes[1].TotalJ)
++	if s.ModelRevision != 3 {
++		t.Fatal("model revision not incremented")
++	}
++	bad := testModel()
++	bad.RxMW = -1
++	if e.SetModel(bad, 3000000) == nil {
++		t.Fatal("accepted bad model")
++	}
++	if e.Snapshot(2000000).ModelRevision != 3 {
++		t.Fatal("invalid load changed state")
++	}
++}
++
++func TestExportClosesOpenInterval(t *testing.T) {
++	// t.Chdir requires Go 1.24; project supports Go 1.23, so restore manually.
++	previous, err := os.Getwd()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chdir(t.TempDir()); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := os.Chdir(previous); err != nil {
++			t.Error(err)
++		}
++	})
++	e := NewEnergyAnalyser()
++	if err := e.SetModel(testModel(), 0); err != nil {
++		t.Fatal(err)
++	}
++	e.AddNode(1, 0)
++	e.GetNode(1).SetRadioState(RadioRx, 0)
++	e.SaveEnergyDataToFile("check", 1234567)
++	closeTo(t, e.Snapshot(1234567).RxJ, 0.006172835)
++	data, err := os.ReadFile("energy_results/check_nodes.txt")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(data), "6.172835") {
++		t.Fatalf("stale node export: %s", data)
++	}
++	data, err = os.ReadFile("energy_results/check.txt")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(data), "1234\t") || !strings.Contains(string(data), "6.172835") {
++		t.Fatalf("stale network export: %s", data)
++	}
++	e.SaveEnergyDataToFile("check", 1234567)
++	if len(e.networkHistory) != 1 {
++		t.Fatal("duplicate history sample at same timestamp")
++	}
++}
++
++func TestLoadModel(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "model.json")
++	valid, _ := json.Marshal(testModel())
++	for _, data := range []string{string(valid), `{"name":"missing","tx":[{"dbm":0,"mw":1}]}`,
++		string(valid) + " {}", strings.Replace(string(valid), `"rx_mw"`, `"rx_typo"`, 1), "null",
++		strings.Replace(string(valid), `"dbm":-20,`, "", 1),
++		strings.Replace(string(valid), `"mw":10`, `"mw_typo":10`, 1)} {
++		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
++			t.Fatal(err)
++		}
++		_, err := LoadModel(path)
++		if data == string(valid) && err != nil {
++			t.Fatal(err)
++		}
++		if data != string(valid) && err == nil {
++			t.Fatalf("accepted invalid JSON: %s", data)
++		}
++	}
++}
+diff --git a/energy/README.md b/energy/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef5f561819a53aaa1a3d125228d9e19a16b515a7
+--- /dev/null
++++ b/energy/README.md
+@@ -0,0 +1,129 @@
++# Configurable radio energy
++
++The analyser integrates electrical power over simulated time. It uses existing
++OT-RFSIM radio energy-state reports (TX only during physical frame/ACK TX,
++RX during listening/CCA/ACK wait) and the effective power retained by the radio
++model from frame events. Channel power limits are therefore reflected in TX
++energy. A rejected concurrent transmission does not replace the accepted frame's
++power. Changes to power and model coefficients apply prospectively.
++
++The radio-state report's requested TX power is deliberately not used: it may
++differ from the frame power after channel limits. No OT-RFSIM C/protocol changes
++or node binary rebuilds are needed.
++
++## Configuration and units
++
++```json
++{
++  "name": "TI-CC2652R-3V-typical-approximation",
++  "disabled_mw": 0.00045,
++  "sleep_mw": 0.00282,
++  "rx_mw": 20.7,
++  "tx": [
++    {"dbm": -20, "mw": 13.8},
++    {"dbm": -10, "mw": 15.9},
++    {"dbm": 0, "mw": 21.0},
++    {"dbm": 5, "mw": 27.6}
++  ]
++}
++```
++
++The supplied `etc/energy-lab-example.json` uses typical TI CC2652R currents
++at 3 V, converted using `P_mW = 3 * I_mA`. The complete file includes all ten
++nominal TX settings
++from -20 to +5 dBm in the datasheet table; the abbreviated example above omits
++some points. See [profile provenance and state mapping](../etc/energy-lab-example.md)
++for the source, conditions and approximations (including the use of published
++BLE PA currents as a didactic approximation for the same chip's Thread radio).
++
++The implemented table interpolates **electrical mW linearly in dBm**; outside
++the range it clamps to the nearest endpoint. For this profile restrict actions
++to [-20, +5] dBm, preferably its ten tabulated levels. The simulator does not
++enforce this range: requesting +20 dBm would otherwise give +20 dBm propagation
++but the +5 dBm electrical cost. A one-point TX table is constant.
++
++Idle listening belongs to **RX**, not Sleep: the receiver stays powered even
++with no packet arriving. `sleep_mw` models radio-off standby, using a typical
++device standby current as a low-power proxy. It is not the MCU's distinct Idle
++mode. The text export's `Idle (mJ)` column means this **Sleep** state.
++GUI/JSON call it Sleep.
++
++At low TX levels this real-radio-based profile has P_TX < P_RX. In an always-on
++router network, additional TX airtime replaces RX listening and can reduce the
++radio-state energy. Do not add another per-packet RX charge on top of listening,
++or assume that each additional hop has a fixed positive energy cost. Evaluate
++the total energy for the chosen traffic and topology.
++
++All fields are required and unknown fields are rejected. State power must be
++finite and nonnegative. RF dBm points must be integers in [-128, 127] and strictly
++increasing; the electrical consumption need not be monotonic (measured radios
++can have PA mode changes). Load the laboratory profile explicitly with
++`ns.energy_model(...)`; otherwise OTNS uses its constant-consumption default.
++
++Internally/GUI/text exports use mJ, while snapshots expose joules:
++`E_mJ = P_mW * duration_us / 1e6`, `E_J = P_mW * duration_us / 1e9`.
++The JSON network total is a sum; the existing GUI and network history are means
++per current node and retain their existing units and meaning.
++
++## Python use
++
++Run from the repository root with the updated pyOTNS and OTNS binary:
++
++```python
++from otns.cli import OTNS
++
++ns = OTNS(otns_args=['-seed', '42'])
++try:
++    ns.energy_model('etc/energy-lab-example.json')
++    ns.radiomodel = 'MutualInterference'
++    ns.add('router', x=0, y=0, txpower=0)
++    ns.add('router', x=100, y=0, txpower=0)
++    ns.go(120)
++
++    start = ns.energy_snapshot()
++    ns.ping(1, 2, datasize=32, count=20, interval=1)
++    ns.go(30)
++    end = ns.energy_snapshot()
++    energy_j = end['total_j'] - start['total_j']
++finally:
++    ns.close()
++```
++
++`pylibs/examples/energy_control.py` is a complete runnable demonstration. Snapshot
++reads run on the simulation dispatcher, close open intervals at `time_us`, and
++do not advance the simulation or append history samples. Save also closes open
++intervals and adds/updates the final history sample.
++
++Snapshot schema 1 includes `time_us`, `scope: "current_nodes"`, `model_name`,
++`model_revision`, root energy components and `total_j`, and sorted `nodes`.
++Each node has `node_id`, the same joule components and `state_times_us`
++(`disabled`, `sleep`, `tx`, `rx`). Counters start at node creation, not at the
++start of a traffic measurement. Use differences to exclude formation/warmup.
++
++Use a fixed node set for rewards. Deleting a node removes its energy from the
++current-node total; recreating its ID starts new counters. Changing the model
++preserves earlier energy and increments its revision; a snapshot spanning such
++a change contains mixed model contributions. Do not change the model during a
++benchmark unless this is intentional. Changing the radiomodel does not reset
++the energy model.
++
++This is **radio** energy, not whole-board/battery energy. Always-on RX is charged
++through its state duration, not again for every received packet. Traffic,
++control frames, ACKs and retries affect the recorded state durations. Use the laboratory
++profile consistently when comparing algorithms, and measure packet delivery
++alongside energy.
++
++## Build and checks
++
++```sh
++go test ./energy ./cli ./dispatcher
++go build -o cmd/otns/otns ./cmd/otns
++PYTHONPATH=pylibs OTNS="$PWD/cmd/otns/otns" .venv-otns/bin/python -m unittest discover -s pylibs/unittests -p test_energy.py -v
++```
++
++The integration tests use existing `ot-rfsim/ot-versions/ot-cli-ftd` binaries,
++temporary working directories and simulation ID 38. They check state-duration
++integrals, identical airtime at different TX powers, live power changes, native
++export freshness, JSON/model loading and totals, with Ideal and
++MutualInterference. Tests require local sockets. Install with
++`go install ./cmd/otns` and `.venv-otns/bin/python -m pip install --no-deps --no-build-isolation ./pylibs`.
+diff --git a/etc/energy-lab-example.json b/etc/energy-lab-example.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7ee30c2be89e24bce56e1a6ed81be8eef0ca701
+--- /dev/null
++++ b/etc/energy-lab-example.json
+@@ -0,0 +1,18 @@
++{
++  "name": "TI-CC2652R-3V-typical-approximation",
++  "disabled_mw": 0.00045,
++  "sleep_mw": 0.00282,
++  "rx_mw": 20.7,
++  "tx": [
++    {"dbm": -20, "mw": 13.8},
++    {"dbm": -15, "mw": 14.7},
++    {"dbm": -10, "mw": 15.9},
++    {"dbm": -5, "mw": 17.7},
++    {"dbm": 0, "mw": 21.0},
++    {"dbm": 1, "mw": 21.9},
++    {"dbm": 2, "mw": 22.8},
++    {"dbm": 3, "mw": 24.6},
++    {"dbm": 4, "mw": 25.8},
++    {"dbm": 5, "mw": 27.6}
++  ]
++}
+diff --git a/etc/energy-lab-example.md b/etc/energy-lab-example.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4fe46c02276a35e602a67e1e38b69e39c87d913c
+--- /dev/null
++++ b/etc/energy-lab-example.md
+@@ -0,0 +1,49 @@
++# TI CC2652R profile for the Thread laboratory
++
++The JSON in `energy-lab-example.json` is a simplified, datasheet-based profile,
++not a measurement of a complete board. Reference: Texas Instruments CC2652R,
++[SWRS207J, revision J](https://www.ti.com/lit/ds/symlink/cc2652r.pdf), sections
++8.5, 8.6 and table 8-1 (printed pages 10, 11 and 32). Conditions: 3 V, typical
++room temperature, DC/DC enabled. Conversion: `P[mW] = 3 V * I[mA]`.
++
++| Nominal TX setting (dBm) | Typical current (mA) | Profile consumption (mW) |
++|---:|---:|---:|
++| -20 | 4.6 | 13.8 |
++| -15 | 4.9 | 14.7 |
++| -10 | 5.3 | 15.9 |
++| -5 | 5.9 | 17.7 |
++| 0 | 7.0 | 21.0 |
++| 1 | 7.3 | 21.9 |
++| 2 | 7.6 | 22.8 |
++| 3 | 8.2 | 24.6 |
++| 4 | 8.6 | 25.8 |
++| 5 | 9.2 | 27.6 |
++
++Other values: RX 6.9 mA → 20.7 mW; standby 0.94 µA → 0.00282 mW;
++shutdown 150 nA → 0.00045 mW.
++
++## Deliberate approximations
++
++- The published TX table characterizes the chip PA in BLE operation. Using it
++  for Thread on the same multiprotocol device is a didactic approximation, not
++  a claim of exact IEEE 802.15.4 current characterization.
++- Profile dBm are the nominal settings. The datasheet's measured RF output
++  differs slightly; that deviation is not modelled.
++- Standby/shutdown chip currents are proxies for radio Sleep/Disabled. The
++  simulator does not track the MCU's independent active/idle state, transition
++  energy or board peripherals. This remains a radio-state energy estimate.
++- The model interpolates between settings and clamps outside the table.
++  Restrict actions to the ten listed settings (or at least [-20, +5] dBm): the
++  energy table alone does not constrain simulated RF output.
++
++## Idle, RX and the hop tradeoff
++
++Listening with no packet arriving is RX, at the same cost as receiving. Radio
++Sleep is radio off. In particular, the text-export column `Idle (mJ)` means
++Sleep, not idle listening. The chip also has a separate MCU Idle mode; it is not
++represented by an additional radio state here.
++
++At low power TX costs less than RX. That is consistent with the reference data.
++For fixed-duration always-listening routers, energy is approximately
++`sum_i[P_RX*T + (P_TX(p_i)-P_RX)*T_TX_i]`. Consequently additional forwarding can
++lower this metric when it replaces more costly RX listening. Evaluate complete network energy rather than assigning a fixed cost per hop.
+diff --git a/pylibs/examples/energy_control.py b/pylibs/examples/energy_control.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa0ef54bd8b0b699000d2d0a391479514b5408c9
+--- /dev/null
++++ b/pylibs/examples/energy_control.py
+@@ -0,0 +1,84 @@
++#!/usr/bin/env python3
++# Copyright (c) 2020-2026, The OTNS Authors.
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. Neither the name of the copyright holder nor the
++#    names of its contributors may be used to endorse or promote products
++#    derived from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++# POSSIBILITY OF SUCH DAMAGE.
++"""Demonstrate fresh energy snapshots and per-node TX control (not an optimizer).
++
++Run from the OTNS repository root, using the updated simulator and pyOTNS.
++The supplied profile approximates typical TI CC2652R currents at 3 V.
++"""
++import json
++from pathlib import Path
++
++from otns.cli import OTNS
++
++
++def main():
++    repo = Path(__file__).resolve().parents[2]
++    ns = OTNS(otns_args=[
++        '-seed', '42', '-ot-cli',
++        str(repo / 'ot-rfsim/ot-versions/ot-cli-ftd'),
++    ])
++    try:
++        ns.energy_model(str(repo / 'etc/energy-lab-example.json'))
++        ns.radiomodel = 'MutualInterference'
++        ns.set_radioparam('ShadowFadingSigmaDb', 0)
++        ns.set_radioparam('TimeFadingSigmaMaxDb', 0)
++        for x in (0, 100):
++            ns.add('router', x=x, y=0, txpower=0)
++        ns.go(120)
++        for power in (5, 0, -10, -20):
++            for node in (1, 2):
++                ns.node_cmd(node, f'txpower {power}')
++            ns.go(60)  # common settling interval, outside the measurement
++            ns.pings()
++            before = ns.energy_snapshot()
++            ns.ping(1, 2, datasize=32, count=20, interval=1)
++            ns.go(30)
++            after = ns.energy_snapshot()
++            replies = ns.pings()
++            successful = sum(p[3] < ns.MAX_PING_DELAY for p in replies)
++            print(
++                json.dumps({
++                    'power_dbm':
++                    power,
++                    'model':
++                    after['model_name'],
++                    'window_s': (after['time_us'] - before['time_us']) / 1e6,
++                    'radio_energy_j':
++                    after['total_j'] - before['total_j'],
++                    'tx_energy_j':
++                    after['tx_j'] - before['tx_j'],
++                    'successful_ping_exchanges':
++                    successful,
++                    'attempted_ping_exchanges':
++                    20,
++                }))
++    finally:
++        ns.close()
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/pylibs/unittests/test_energy.py b/pylibs/unittests/test_energy.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b36c1fd2df2b20ef7cbf18240ae954dae32f7b1
+--- /dev/null
++++ b/pylibs/unittests/test_energy.py
+@@ -0,0 +1,196 @@
++#!/usr/bin/env python3
++# Copyright (c) 2020-2026, The OTNS Authors.
++# All rights reserved.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions are met:
++# 1. Redistributions of source code must retain the above copyright
++#    notice, this list of conditions and the following disclaimer.
++# 2. Redistributions in binary form must reproduce the above copyright
++#    notice, this list of conditions and the following disclaimer in the
++#    documentation and/or other materials provided with the distribution.
++# 3. Neither the name of the copyright holder nor the
++#    names of its contributors may be used to endorse or promote products
++#    derived from this software without specific prior written permission.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
++# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++# POSSIBILITY OF SUCH DAMAGE.
++"""Energy integration tests against OTNS and existing OT-RFSIM binaries.
++
++Use OTNS=/path/to/patched/otns to select a binary under test.
++"""
++import json
++import os
++from pathlib import Path
++import tempfile
++import unittest
++
++from otns.cli import OTNS
++from otns.cli.errors import OTNSCliError
++
++REPO = Path(__file__).resolve().parents[2]
++
++
++class EnergyTests(unittest.TestCase):
++
++    def setUp(self):
++        self.previous_cwd = os.getcwd()
++        self.directory = tempfile.TemporaryDirectory(prefix="otns-energy-")
++        os.chdir(self.directory.name)
++        self.ns = None
++
++    def tearDown(self):
++        if self.ns is not None:
++            self.ns.close()
++        os.chdir(self.previous_cwd)
++        self.directory.cleanup()
++
++    def start(self, power=-20, model="Ideal"):
++        self.ns = OTNS(sim_id=38,
++                       otns_args=[
++                           "-seed",
++                           "42",
++                           "-ot-cli",
++                           str(REPO / "ot-rfsim/ot-versions/ot-cli-ftd"),
++                           "-no-replay",
++                           "-pcap",
++                           "off",
++                           "-logfile",
++                           "off",
++                       ])
++        ns = self.ns
++        ns.radiomodel = model
++        if model == "MutualInterference":
++            ns.set_radioparam("ShadowFadingSigmaDb", 0)
++            ns.set_radioparam("TimeFadingSigmaMaxDb", 0)
++        ns.energy_model(str(REPO / "etc/energy-lab-example.json"))
++        for x in (0, 100):
++            ns.add("router", x=x, y=0, txpower=power)
++        ns.go(120)
++        return ns
++
++    def window(self):
++        ns = self.ns
++        before = ns.energy_snapshot()
++        ns.pings()
++        for _ in range(10):
++            ns.ping(1, 2, datasize=32)
++            ns.go(0.5)
++        ns.go(10.123456)
++        after = ns.energy_snapshot()
++        replies = ns.pings()
++        self.assertEqual(10, sum(p[3] < ns.MAX_PING_DELAY for p in replies))
++        self.assertEqual(15123456, after["time_us"] - before["time_us"])
++        return before, after
++
++    def assert_window(self, before, after, tx_mw):
++        self.assertEqual(after, self.ns.energy_snapshot())
++        self.assertAlmostEqual(after["total_j"],
++                               sum(n["total_j"] for n in after["nodes"]),
++                               places=12)
++        old = {n["node_id"]: n for n in before["nodes"]}
++        model = self.ns.energy_model()
++        for node in after["nodes"]:
++            previous = old[node["node_id"]]
++            for state in ("disabled", "sleep", "rx", "tx"):
++                duration = node["state_times_us"][state] - previous[
++                    "state_times_us"][state]
++                node_tx_mw = tx_mw[node["node_id"]] if isinstance(
++                    tx_mw, dict) else tx_mw
++                mw = node_tx_mw if state == "tx" else model[state + "_mw"]
++                self.assertAlmostEqual(node[state + "_j"] -
++                                       previous[state + "_j"],
++                                       duration * mw / 1e9,
++                                       places=12)
++            self.assertEqual(sum(node["state_times_us"].values()),
++                             after["time_us"])
++
++    def test_live_power_changes_and_export(self):
++        ns = self.start()
++        before, after = self.window()
++        self.assert_window(before, after, 13.8)
++        for i in (1, 2):
++            ns.node_cmd(i, "txpower 0")
++        # Changing a configuration without time advancing must not change past energy.
++        self.assertEqual(after, ns.energy_snapshot())
++        before, after = self.window()
++        self.assert_window(before, after, 21.0)
++        ns.cmd('energy save "current"')
++        lines = Path(
++            "energy_results/current_nodes.txt").read_text().splitlines()[2:]
++        by_id = {n["node_id"]: n for n in after["nodes"]}
++        for line in lines:
++            parts = line.split()
++            node = by_id[int(parts[0])]
++            for value, state in zip(parts[1:],
++                                    ("disabled", "sleep", "tx", "rx")):
++                self.assertAlmostEqual(float(value) / 1000,
++                                       node[state + "_j"],
++                                       places=8)
++        network_last_time_ms = int(
++            Path("energy_results/current.txt").read_text().splitlines()
++            [-1].split()[0])
++        self.assertEqual(network_last_time_ms, after["time_us"] // 1000)
++
++    def test_power_also_accounted_with_mutual_interference(self):
++        self.start(power=0, model="MutualInterference")
++        before, after = self.window()
++        self.assert_window(before, after, 21.0)
++
++    def test_per_node_power_including_ack_sender(self):
++        ns = self.start(power=-20)
++        ns.node_cmd(1, "txpower 0")
++        before, after = self.window()
++        self.assert_window(before, after, {1: 21.0, 2: 13.8})
++        for old, new in zip(before["nodes"], after["nodes"]):
++            self.assertGreater(new["state_times_us"]["tx"],
++                               old["state_times_us"]["tx"])
++
++    def test_same_airtime_different_electrical_energy(self):
++        windows = []
++        for power in (-20, 0):
++            self.start(power=power)
++            windows.append(self.window())
++            self.ns.close()
++            self.ns = None
++        (lo0, lo1), (hi0, hi1) = windows
++        lo_time = sum(b["state_times_us"]["tx"] - a["state_times_us"]["tx"]
++                      for a, b in zip(lo0["nodes"], lo1["nodes"]))
++        hi_time = sum(b["state_times_us"]["tx"] - a["state_times_us"]["tx"]
++                      for a, b in zip(hi0["nodes"], hi1["nodes"]))
++        self.assertGreater(lo_time, 0)
++        self.assertEqual(lo_time, hi_time)
++        self.assertAlmostEqual(
++            (hi1["tx_j"] - hi0["tx_j"]) / (lo1["tx_j"] - lo0["tx_j"]),
++            21 / 13.8,
++            places=10)
++
++    def test_model_validation_and_switch(self):
++        ns = self.start()
++        before = ns.energy_snapshot()
++        model = ns.energy_model()
++        path = Path('modello è "uno".json')
++        path.write_text(json.dumps(dict(model, rx_mw=-1)))
++        with self.assertRaises(OTNSCliError):
++            ns.energy_model(path)
++        self.assertEqual(before, ns.energy_snapshot())
++        path.write_text(
++            json.dumps(dict(model, name="changed", rx_mw=2 * model["rx_mw"])))
++        ns.energy_model(path)
++        after = ns.energy_snapshot()
++        self.assertEqual(after["total_j"], before["total_j"])
++        self.assertEqual(after["model_revision"], before["model_revision"] + 1)
++        self.assertEqual(after["model_name"], "changed")
++
++
++if __name__ == "__main__":
++    unittest.main()
