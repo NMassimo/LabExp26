@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OTNS = ROOT / "otns"
 
 
@@ -33,7 +33,7 @@ def main():
             print(f"Applied: {patch.name}")
             continue
         if args.check:
-            sys.exit(f"Missing or modified patch: {patch.name}; run scripts/apply-patches.py.")
+            sys.exit(f"Missing or modified patch: {patch.name}; rerun ./scripts/setup.sh.")
         check = git("apply", "--check", "--whitespace=error", str(patch))
         if check.returncode:
             sys.exit(f"Cannot apply {patch.name}; keep/review local changes before retrying.\n{check.stderr}")

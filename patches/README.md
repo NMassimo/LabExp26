@@ -9,11 +9,12 @@ profile, JSON CLI commands, Python methods, documentation, tests and example.
 `0002-local-bootstrap-gui.patch` lets the upstream bootstrap use a selected
 Python environment and compiles grpcwebproxy v0.15.0 for the host architecture
 into the selected GOBIN. The standard bootstrap still installs/builds all OTNS
-components. Apply the series with:
+components. Student setup applies the series automatically. For maintenance,
+the helper can also be called directly:
 
 ```sh
-python3 scripts/apply-patches.py
-python3 scripts/apply-patches.py --check
+python3 scripts/internal/apply-patches.py
+python3 scripts/internal/apply-patches.py --check
 ```
 
 The submodule HEAD stays at the upstream commit. The patch modifies its working
@@ -35,14 +36,13 @@ Do not commit the patch into the OTNS submodule or use `git submodule update
 Edit the selected files in `otns/`, then run:
 
 ```sh
-python3 scripts/export-patch.py
+python3 tools/export-patch.py
 ./scripts/setup.sh
-./scripts/check.sh
 ```
 
 The exporter regenerates both patches and includes modified upstream files and new files, without
 changing the submodule index. If the implementation adds another source file,
-include its path in the appropriate group in `scripts/export-patch.py`. Review the generated diff before
+include its path in the appropriate group in `tools/export-patch.py`. Review the generated diff before
 committing it to the course repository. Test application on a fresh checkout
 when changing the patch or upstream revision.
 

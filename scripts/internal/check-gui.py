@@ -10,7 +10,7 @@ import urllib.request
 
 from otns.cli import OTNS
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def get_ready(url, allow_empty=False):

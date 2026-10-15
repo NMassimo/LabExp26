@@ -24,6 +24,10 @@ checkout during setup; OTNS itself stays at the pinned commit.
 
 ## One-command setup
 
+Students use two scripts: `setup.sh` to install and check the simulator, and
+`run-otns.sh` to start it. The helpers in `scripts/internal/` are called
+automatically.
+
 Clone the course repository, then run **one script**:
 
 ```sh
@@ -84,7 +88,7 @@ energy model "etc/energy-lab-example.json"
 Setup runs the checks automatically. To rerun them independently:
 
 ```sh
-./scripts/check.sh
+./scripts/setup.sh --check
 ```
 
 They verify energy integration, power changes, exports and Python control using
@@ -104,8 +108,8 @@ python pylibs/examples/energy_control.py
 ```
 
 The example uses two routers, changes their TX powers and measures energy and
-successful ping exchanges. The wrapper `scripts/run-example.sh` runs it from
-any working directory and stores simulator-generated files in `results/example/`.
+successful ping exchanges. Setup and `setup.sh --check` also run this example,
+storing simulator-generated files in `results/example/`.
 
 The central API is:
 
@@ -155,7 +159,10 @@ in `otns/energy/README.md` and `otns/pylibs/examples/energy_control.py`.
 otns/                 pinned upstream submodule
 otns.commit           expected OTNS revision
 patches/              course modifications to OTNS
-scripts/              setup, checks, GUI and example launchers
+scripts/setup.sh      install everything and run checks (--check: checks only)
+scripts/run-otns.sh    start OTNS with its GUI
+scripts/internal/     implementation helpers (called automatically)
+tools/                instructor tools for patch maintenance
 requirements.txt      pinned Python dependencies
 locks/                Go dependency and toolchain checksums
 .local/               generated local executable (ignored)

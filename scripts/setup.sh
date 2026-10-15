@@ -2,6 +2,14 @@
 # Install patched OTNS, all node versions and the GUI, then run course checks.
 set -euo pipefail
 LAB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+case "${1:-}" in
+    --check)
+        [[ $# == 1 ]] || { echo "Usage: $0 [--check]" >&2; exit 1; }
+        exec "$LAB_ROOT/scripts/internal/check.sh"
+        ;;
+    "") ;;
+    *) echo "Usage: $0 [--check]" >&2; exit 1 ;;
+esac
 case "$(uname -s)" in
     Darwin)
         Darwin=1; Linux=0
@@ -31,8 +39,8 @@ fi
 if ! "$LAB_PYTHON" -c 'import venv, ensurepip' >/dev/null 2>&1; then
     install_package virtualenv --apt python3-venv --brew python3
 fi
-"$LAB_PYTHON" "$LAB_ROOT/scripts/apply-patches.py"
-LAB_GO_BIN=$("$LAB_PYTHON" "$LAB_ROOT/scripts/ensure-go.py")
+"$LAB_PYTHON" "$LAB_ROOT/scripts/internal/apply-patches.py"
+LAB_GO_BIN=$("$LAB_PYTHON" "$LAB_ROOT/scripts/internal/ensure-go.py")
 mkdir -p "$LAB_ROOT/.local/bin"
 export GOBIN="$LAB_ROOT/.local/bin"
 export OTNS_PYTHON_VENV="$LAB_ROOT/.venv"
@@ -47,6 +55,5 @@ python -m pip install -r "$LAB_ROOT/requirements.txt"
     cp "$LAB_ROOT/locks/otns-go.sum" go.sum
     ./script/bootstrap
 )
-"$LAB_ROOT/scripts/check.sh"
-"$LAB_ROOT/scripts/run-example.sh"
+"$LAB_ROOT/scripts/internal/check.sh"
 echo "Setup and checks completed. Start the GUI with ./scripts/run-otns.sh."
