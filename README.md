@@ -83,6 +83,28 @@ OTNS is running. Load the laboratory energy profile in the OTNS CLI with:
 energy model "etc/energy-lab-example.json"
 ```
 
+By default, runtime files are written inside `otns/`: `current.pcap` in its
+root and node logs/flash files in `tmp/`. To use a named directory under
+`results/` instead:
+
+```sh
+./scripts/run-otns.sh --results experiment-01
+```
+
+This creates `results/experiment-01/` and uses it as OTNS's working directory,
+regardless of where the launcher is called from. The name must be a single
+directory name. Reusing a name reuses that directory; `current.pcap` and other
+runtime files may be overwritten. Relative input and export paths are resolved
+from this directory too. In this mode, load the course profile with:
+
+```text
+energy model "../../otns/etc/energy-lab-example.json"
+```
+
+OTNS options can also be passed, for example
+`./scripts/run-otns.sh --results experiment-01 -web=false`.
+Use `./scripts/run-otns.sh --help` for launcher help and `-h` for OTNS options.
+
 ## Checks
 
 Setup runs the checks automatically. To rerun them independently:
