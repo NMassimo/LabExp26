@@ -25,8 +25,6 @@ Prerequisites to run the setup:
   supports Intel and Apple Silicon.
 - Internet access and sufficient disk space for the Go, C/C++ and node builds.
 
-## One-command setup
-
 To setup the simulator for the first time simply run these commands:
 
 ```sh
