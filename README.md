@@ -1,14 +1,6 @@
 # LAB EXPERIENCE IN COMMUNICATION NETWORKS AND INTERNET
 
-Thread wireless networking laboratory for MSc students in Telecommunications
-Engineering. The activity is designed for approximately **30 hours** of student
-work using a local computer.
-
-The goal is to develop an algorithm that selects each station's transmission
-power to reduce total simulated radio energy while maintaining packet delivery.
-Heuristics, numerical optimization and reinforcement learning can use the same
-Python simulation interface. Evaluation topologies and traffic are supplied by
-the instructor.
+Thread wireless networking laboratory for MSc engineering students of Politecnico di Milano.
 
 ## Simulator and reproducibility
 
@@ -22,34 +14,9 @@ JSON/Python snapshots and integration of the upstream bootstrap with a local
 Python environment and native GUI proxy. Patches are applied to the upstream
 checkout during setup; OTNS itself stays at the pinned commit.
 
-## One-command setup
+## Setup
 
-Students use two scripts: `setup.sh` to install and check the simulator, and
-`run-otns.sh` to start it. The helpers in `scripts/internal/` are called
-automatically.
-
-Clone the course repository, then run **one script**:
-
-```sh
-git clone <repository-url> lab-experience
-cd lab-experience
-./scripts/setup.sh
-```
-
-The script initializes the pinned submodules, applies both course patches and
-runs the **upstream OTNS bootstrap**. It installs the required build tools,
-prepares Python, builds OTNS plus all standard node versions (including the
-border router), installs the native GUI proxy and runs the upstream version
-tests, course checks and a traffic example. The GUI assets are bundled with
-OTNS; Node.js/npm are not required to run it.
-
-The simulator and GUI proxy are installed in **`.local/bin/`** and Python
-packages in **`.venv/`**. If Go 1.23+ is unavailable, a local Go toolchain is
-downloaded with a verified SHA-256 checksum. OTNS/Python installations elsewhere
-on the machine are not overwritten. System build dependencies may be installed
-through the platform package manager and may request administrator access.
-
-Prerequisites for running setup:
+Prerequisites to run the setup:
 
 - **Linux:** Ubuntu 22.04+ with Git, a browser and access to `sudo`/APT.
 - **Windows:** WSL2 with Ubuntu 22.04+, Git and `sudo`/APT. Keep the checkout in
@@ -57,6 +24,28 @@ Prerequisites for running setup:
 - **macOS:** Git/Xcode command-line tools, Homebrew and a browser. The setup
   supports Intel and Apple Silicon.
 - Internet access and sufficient disk space for the Go, C/C++ and node builds.
+
+## One-command setup
+
+To setup the simulator for the first time simply run these commands:
+
+```sh
+git clone https://github.com/NMassimo/LabExp26.git
+cd LabExp26
+./scripts/setup.sh
+```
+
+The script initializes the pinned submodules, applies course patches and
+runs the **upstream OTNS bootstrap**. It installs the required build tools,
+prepares Python, builds OTNS plus all standard node versions (including the
+border router), installs the native GUI proxy and runs the upstream version
+tests, course checks and a traffic example.
+
+The simulator and GUI proxy are installed in **`.local/bin/`** and Python
+packages in **`.venv/`**. If Go 1.23+ is unavailable, a local Go toolchain is
+downloaded with a verified SHA-256 checksum. OTNS/Python installations elsewhere
+on the machine are not overwritten. System build dependencies may be installed
+through the platform package manager and may request administrator access.
 
 The first complete build may take several minutes. The script can be rerun:
 existing dependencies/build outputs are reused and patches are not applied twice.
@@ -77,11 +66,8 @@ After setup:
 This opens the GUI in the default browser and starts the OTNS CLI. If browser
 opening is unavailable (for example in WSL2), open
 [the local GUI](http://localhost:8997/visualize?addr=localhost:8998) manually while
-OTNS is running. Load the laboratory energy profile in the OTNS CLI with:
-
-```text
-energy model "etc/energy-lab-example.json"
-```
+OTNS is running. The launcher automatically loads the laboratory energy profile
+(`otns/etc/energy-lab-example.json`) before the simulation starts.
 
 By default, runtime files are written inside `otns/`: `current.pcap` in its
 root and node logs/flash files in `tmp/`. To use a named directory under
@@ -95,11 +81,7 @@ This creates `results/experiment-01/` and uses it as OTNS's working directory,
 regardless of where the launcher is called from. The name must be a single
 directory name. Reusing a name reuses that directory; `current.pcap` and other
 runtime files may be overwritten. Relative input and export paths are resolved
-from this directory too. In this mode, load the course profile with:
-
-```text
-energy model "../../otns/etc/energy-lab-example.json"
-```
+from this directory too.
 
 OTNS options can also be passed, for example
 `./scripts/run-otns.sh --results experiment-01 -web=false`.

@@ -4,6 +4,4 @@ __pycache__/
 /.venv/
 /.local/
 /results/
-/verifica_otns/
-.idea/
 .vscode/

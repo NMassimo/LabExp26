@@ -7,7 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 OTNS = ROOT / "otns"
 PATHS = [
-    "cli/CmdRunner.go", "cli/README.md", "cli/ast.go", "cli/energy_test.go",
+    "otns_main/otns_main.go", "cli/CmdRunner.go", "cli/README.md", "cli/ast.go", "cli/energy_test.go",
     "dispatcher/dispatcher.go", "energy/core.go", "energy/node.go",
     "energy/types.go", "energy/model.go", "energy/snapshot.go",
     "energy/energy_test.go", "energy/README.md", "etc/energy-lab-example.json",

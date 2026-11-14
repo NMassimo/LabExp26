@@ -3,7 +3,7 @@
 set -euo pipefail
 LAB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 LAB_RUN_DIR="$LAB_ROOT/otns"
-LAB_OTNS_ARGS=()
+LAB_OTNS_ARGS=(-energy-model "$LAB_ROOT/otns/etc/energy-lab-example.json")
 LAB_RESULTS_SET=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -24,6 +24,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help)
             echo "Usage: $0 [--results NAME] [OTNS options]"
+            echo "The laboratory radio energy profile is loaded automatically."
             echo "Save runtime files in results/NAME (default: otns/)."
             echo "Use -h for OTNS options. Existing output files may be overwritten."
             exit 0
@@ -40,8 +41,4 @@ export PATH="$LAB_ROOT/.local/bin:$LAB_ROOT/.venv/bin:$LAB_ROOT/otns/ot-rfsim/ot
 mkdir -p "$LAB_RUN_DIR"
 cd "$LAB_RUN_DIR"
 echo "OTNS working directory: $LAB_RUN_DIR" >&2
-# Bash 3.2 (macOS) treats an empty array as unset with nounset enabled.
-if [[ ${#LAB_OTNS_ARGS[@]} -gt 0 ]]; then
-    exec "$LAB_ROOT/.local/bin/otns" "${LAB_OTNS_ARGS[@]}"
-fi
-exec "$LAB_ROOT/.local/bin/otns"
+exec "$LAB_ROOT/.local/bin/otns" "${LAB_OTNS_ARGS[@]}"
